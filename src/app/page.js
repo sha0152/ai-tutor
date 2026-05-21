@@ -2,194 +2,281 @@
 
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import katex from "katex";
+import "katex/dist/katex.min.css";
+import { marked } from "marked";
 
 export default function Home() {
   const [user, setUser] = useState(null);
-  const [mode, setMode] = useState("login");
+  const [authReady, setAuthReady] = useState(false);
 
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-
-  const [message, setMessage] = useState("");
   const [chat, setChat] = useState([]);
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+
+  const [puterReady, setPuterReady] = useState(false);
 
   const chatRef = useRef(null);
 
-  // LOAD PUTER
+  // ---------------- AUTH ----------------
   useEffect(() => {
-    const script = document.createElement("script");
-    script.src = "https://js.puter.com/v2/";
-    script.async = true;
-    document.body.appendChild(script);
-  }, []);
-
-  // AUTH CHECK
-  useEffect(() => {
-    async function checkUser() {
+    async function init() {
       const {
         data: { user },
       } = await supabase.auth.getUser();
 
-      if (user) {
-        setUser(user);
-        setMode("app");
-      }
+      setUser(user ?? null);
+      setAuthReady(true);
     }
 
-    checkUser();
+    init();
 
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      console.log(event);
+    const { data: listener } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setUser(session?.user ?? null);
+        setAuthReady(true);
+      }
+    );
 
-      if (event === "SIGNED_IN" && session?.user) {
-        setUser(session.user);
-        setMode("app");
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!authReady) return;
+
+    if (!user) {
+      window.location.href = "/signin";
+    }
+  }, [user, authReady]);
+
+  // ---------------- LOAD CHAT HISTORY ----------------
+  useEffect(() => {
+    if (!user) return;
+
+    async function loadMessages() {
+      const { data, error } = await supabase
+        .from("messages")
+        .select("*")
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        console.error(error);
+        return;
       }
 
-      if (event === "SIGNED_OUT") {
-        setUser(null);
-        setMode("login");
+      const formatted = data.map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+
+      setChat(formatted);
+    }
+
+    loadMessages();
+  }, [user]);
+
+  // ---------------- LOAD PUTER ----------------
+  useEffect(() => {
+    const script = document.createElement("script");
+
+    script.src = "https://js.puter.com/v2/";
+    script.async = true;
+
+    script.onload = () => {
+      setTimeout(() => {
+        if (window.puter?.ai?.chat) {
+          setPuterReady(true);
+        }
+      }, 500);
+    };
+
+    document.body.appendChild(script);
+  }, []);
+
+  // ---------------- AUTO SCROLL ----------------
+  useEffect(() => {
+    chatRef.current?.scrollTo({
+      top: chatRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [chat, loading]);
+
+  // ---------------- CLEAN AI OUTPUT ----------------
+  function cleanAI(text) {
+  if (!text) return "";
+
+  return text
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+  // ---------------- RENDER CONTENT ----------------
+  function renderContent(text) {
+    if (!text) return "";
+
+    let cleaned = cleanAI(text);
+
+    let html = marked.parse(cleaned);
+
+    // block math
+    html = html.replace(/\$\$([\s\S]+?)\$\$/g, (_, expr) => {
+      try {
+        return katex.renderToString(expr.trim(), {
+          displayMode: true,
+          throwOnError: false,
+          strict: false,
+        });
+      } catch {
+        return `$$${expr}$$`;
       }
     });
 
-    return () => subscription.unsubscribe();
-  }, []);
-
-  // AUTO SCROLL
-  useEffect(() => {
-    if (chatRef.current) {
-      chatRef.current.scrollTo({
-        top: chatRef.current.scrollHeight,
-        behavior: "smooth",
-      });
-    }
-  }, [chat, loading]);
-
-  // SIGN UP
-  async function signUp() {
-    try {
-      const { data, error } = await supabase.auth.signUp({
-        email: email,
-        password: password,
-      });
-
-      console.log("SIGNUP:", data, error);
-
-      if (error) {
-        alert(error.message);
-        return;
+    // inline math
+    html = html.replace(/\$([^\$]+?)\$/g, (_, expr) => {
+      try {
+        return katex.renderToString(expr.trim(), {
+          displayMode: false,
+          throwOnError: false,
+          strict: false,
+        });
+      } catch {
+        return `$${expr}$`;
       }
+    });
 
-      alert("Account created! Please login.");
-    } catch (err) {
-      console.log(err);
-      alert("Signup failed");
-    }
+    return html;
   }
 
-  // LOGIN
-  async function signIn() {
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: email,
-        password: password,
-      });
+  // ---------------- CLEAR MEMORY ----------------
+  async function clearMemory() {
+    if (!user) return;
 
-      console.log("LOGIN:", data, error);
+    await supabase
+      .from("messages")
+      .delete()
+      .eq("user_id", user.id);
 
-      if (error) {
-        alert(error.message);
-        return;
-      }
-
-      if (data?.user) {
-        setUser(data.user);
-        setMode("app");
-      }
-    } catch (err) {
-      console.log(err);
-      alert("Login failed");
-    }
-  }
-
-  // LOGOUT
-  async function logout() {
-    await supabase.auth.signOut();
-
-    setUser(null);
     setChat([]);
-    setMode("login");
   }
 
-  // SEND MESSAGE
+  // ---------------- SEND ----------------
   async function sendMessage() {
     if (!message.trim() || loading) return;
 
-    const newChat = [...chat, { role: "user", content: message }];
+    if (!puterReady || !window.puter?.ai?.chat) {
+      alert("AI still loading...");
+      return;
+    }
+
+    const userMessage = {
+      role: "user",
+      content: message,
+    };
+
+    const newChat = [...chat, userMessage];
 
     setChat(newChat);
     setMessage("");
     setLoading(true);
 
-    try {
-      if (!window.puter?.ai?.chat) {
-        throw new Error("AI not loaded");
-      }
+    // SAVE USER MESSAGE
+    await supabase.from("messages").insert({
+      user_id: user.id,
+      role: "user",
+      content: message,
+    });
 
-      const response = await window.puter.ai.chat(
+    try {
+      // recent memory for AI
+      const memory = newChat.slice(-20);
+
+      const res = await window.puter.ai.chat(
         [
           {
             role: "system",
             content: `
-You are a real private tutor helping a student 1-on-1.
+You are a premium AI tutor.
 
-IMPORTANT RULES:
-- NEVER use markdown
-- NEVER use headings
-- NEVER use bullet points
-- NEVER use numbered lists unless absolutely needed
-- Talk naturally like a real tutor texting a student
-- Keep replies short and conversational
-- Teach only ONE concept at a time
-- Avoid giant explanations
-- Ask only ONE follow-up question at the end
-- Use simple language
-- Encourage the student naturally
-- Do not dump information all at once
-- Format math naturally in plain text
+IMPORTANT:
+ALL mathematics MUST use proper LaTeX delimiters.
 
-Your goal is to feel like a real human tutor, not ChatGPT.
-            `,
+INLINE math:
+$x^2$
+
+BLOCK math:
+$$
+x^2+3x+1
+$$
+
+NEVER use:
+- [ ... ]
+- \\( ... \\)
+- malformed LaTeX
+- partial math syntax
+- HTML tags
+- mixed formatting
+
+STYLE:
+- Sound natural and human
+- Avoid robotic outlines
+- Use clean markdown
+- Keep spacing generous
+- Keep explanations short and readable
+- Use headings only when useful
+- Use bold text sparingly
+- Never create giant walls of text
+
+MATH STYLE:
+- Every equation MUST be wrapped correctly
+- Never leave loose symbols outside LaTeX
+
+QUESTION STYLE:
+- Let the student think
+- Give hints before answers
+- Explain mistakes gently
+- Keep learning interactive
+
+GENERAL:
+- Teach any subject naturally
+- Prioritize readability
+- Make lessons feel modern and premium
+`,
           },
-          ...newChat,
+
+          ...memory,
         ],
         {
-          model: "openai/gpt-5.4-nano",
+          model: "google/gemini-3.1-flash-lite",
         }
       );
 
-      const finalChat = [
-        ...newChat,
-        {
-          role: "assistant",
-          content:
-            response?.message?.content ||
-            "Sorry, I couldn't respond.",
-        },
-      ];
+      const aiText =
+        res?.message?.content || "No response.";
 
-      setChat(finalChat);
+      const aiMessage = {
+        role: "assistant",
+        content: aiText,
+      };
+
+      setChat([...newChat, aiMessage]);
+
+      // SAVE AI MESSAGE
+      await supabase.from("messages").insert({
+        user_id: user.id,
+        role: "assistant",
+        content: aiText,
+      });
     } catch (err) {
-      console.log(err);
+      console.error(err);
 
       setChat([
         ...newChat,
         {
           role: "assistant",
-          content: "Something went wrong. Try again.",
+          content: "Something went wrong.",
         },
       ]);
     }
@@ -197,200 +284,210 @@ Your goal is to feel like a real human tutor, not ChatGPT.
     setLoading(false);
   }
 
-  // ================= LOGIN SCREEN =================
-  if (mode !== "app") {
-    return (
-      <main className="min-h-screen flex items-center justify-center bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white p-4">
-
-        <div className="w-full max-w-md bg-white/5 border border-white/10 rounded-3xl p-8 backdrop-blur-2xl shadow-2xl">
-
-          <div className="text-center mb-8">
-            <h1 className="text-4xl font-bold tracking-tight">
-              AI Tutor
-            </h1>
-
-            <p className="text-zinc-400 mt-2">
-              Your personal AI tutor
-            </p>
-          </div>
-
-          <div className="space-y-4">
-
-            <input
-              type="email"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full p-4 rounded-2xl bg-white/10 border border-white/10 outline-none focus:border-blue-500 transition"
-            />
-
-            <input
-              type="password"
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full p-4 rounded-2xl bg-white/10 border border-white/10 outline-none focus:border-blue-500 transition"
-            />
-
-            <button
-              onClick={signIn}
-              className="w-full bg-blue-600 hover:bg-blue-500 transition py-4 rounded-2xl font-semibold active:scale-[0.98]"
-            >
-              Login
-            </button>
-
-            <button
-              onClick={signUp}
-              className="w-full bg-zinc-800 hover:bg-zinc-700 transition py-4 rounded-2xl font-semibold active:scale-[0.98]"
-            >
-              Create Account
-            </button>
-
-          </div>
-
-        </div>
-
-      </main>
-    );
-  }
-
-  // ================= APP =================
+  // ---------------- UI ----------------
   return (
-    <main className="min-h-screen bg-gradient-to-br from-zinc-950 via-black to-zinc-900 text-white flex items-center justify-center p-4 font-sans">
-
-      <div className="w-full max-w-3xl flex flex-col h-[90vh]">
-
-        {/* HEADER */}
-        <div className="text-center mb-4">
-
-          <h1 className="text-4xl font-semibold tracking-tight">
-            AI Tutor
-          </h1>
-
-          <div className="flex items-center justify-center gap-3 mt-2">
-
-            <p className="text-sm text-zinc-400">
-              {user?.email}
-            </p>
-
-            <button
-              onClick={logout}
-              className="text-sm px-3 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 transition"
-            >
-              Logout
-            </button>
-
+    <div
+      className="
+        h-screen flex flex-col
+        bg-gradient-to-br
+        from-[#050816]
+        via-[#0b1220]
+        to-[#111827]
+        text-white
+        p-4
+      "
+    >
+      {/* HEADER */}
+      <div className="flex justify-between items-center mb-4">
+        <div>
+          <div
+            className="
+              text-3xl font-bold
+              bg-gradient-to-r
+              from-cyan-300
+              via-blue-300
+              to-indigo-300
+              bg-clip-text
+              text-transparent
+            "
+          >
+            TutorAI
           </div>
 
+          <div className="text-sm text-white/40 mt-1">
+            Premium AI learning assistant
+          </div>
         </div>
 
-        {/* CHAT */}
-        <div
-          ref={chatRef}
-          className="flex-1 overflow-y-auto rounded-3xl p-5 space-y-4 bg-white/5 backdrop-blur-xl border border-white/10 shadow-2xl"
-        >
-
-          {chat.length === 0 && (
-            <div className="text-zinc-500 text-center mt-10 animate-pulse">
-              Ask something like "teach me algebra"
-            </div>
-          )}
-
-          {chat.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex animate-fadeIn ${
-                msg.role === "user"
-                  ? "justify-end"
-                  : "justify-start"
-              }`}
-            >
-              <div
-                className={`px-4 py-3 rounded-2xl max-w-[80%] text-sm leading-relaxed shadow-md whitespace-pre-wrap ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-white/10 text-zinc-100"
-                }`}
-              >
-                {msg.content}
-              </div>
-            </div>
-          ))}
-
-          {/* TYPING */}
-          {loading && (
-            <div className="flex items-center gap-2 text-zinc-400 text-sm animate-pulse">
-
-              <div className="flex gap-1">
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce"></span>
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce delay-75"></span>
-                <span className="w-2 h-2 bg-zinc-400 rounded-full animate-bounce delay-150"></span>
-              </div>
-
-              Tutor is thinking...
-            </div>
-          )}
-
-        </div>
-
-        {/* INPUT */}
-        <div className="mt-4 flex gap-2">
-
-          <input
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Ask anything to learn..."
-            className="flex-1 p-4 rounded-2xl bg-white/10 backdrop-blur-md outline-none border border-white/10 focus:border-blue-500 transition"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !loading) {
-                sendMessage();
-              }
-            }}
-          />
-
+        <div className="flex gap-3">
           <button
-            onClick={() => {
-              if (!loading) sendMessage();
-            }}
-            className={`px-6 rounded-2xl transition-all shadow-lg active:scale-95 ${
-              loading
-                ? "bg-zinc-600 text-zinc-300 cursor-not-allowed opacity-70"
-                : "bg-blue-600 hover:bg-blue-500"
-            }`}
+            onClick={clearMemory}
+            className="
+              px-5 py-2.5 rounded-2xl
+              bg-red-500/10
+              hover:bg-red-500/20
+              border border-red-400/20
+              backdrop-blur-xl
+              transition-all duration-300
+            "
           >
-            {loading ? "..." : "Send"}
+            Clear Memory
           </button>
 
+          <button
+            onClick={() => supabase.auth.signOut()}
+            className="
+              px-5 py-2.5 rounded-2xl
+              bg-white/10
+              hover:bg-white/15
+              border border-white/10
+              backdrop-blur-xl
+              transition-all duration-300
+            "
+          >
+            Logout
+          </button>
         </div>
-
       </div>
 
-      {/* ANIMATIONS */}
-      <style jsx>{`
-        .animate-fadeIn {
-          animation: fadeIn 0.25s ease-out;
-        }
+      {/* LOADING */}
+      {!puterReady && (
+        <div className="text-cyan-300 mb-3 animate-pulse">
+          Loading AI...
+        </div>
+      )}
 
-        @keyframes fadeIn {
-          from {
-            opacity: 0;
-            transform: translateY(6px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
-        }
+      {/* CHAT */}
+      <div
+        ref={chatRef}
+        className="
+          flex-1 overflow-y-auto
+          rounded-[34px]
+          border border-white/10
+          bg-white/[0.04]
+          backdrop-blur-3xl
+          p-5
+          shadow-2xl
+        "
+      >
+        {chat.map((c, i) => (
+          <div
+            key={i}
+            className={`
+              mb-5 p-6 rounded-[30px]
+              border border-white/10
+              backdrop-blur-2xl
+              transition-all duration-300
+              shadow-lg
 
-        .delay-75 {
-          animation-delay: 0.15s;
-        }
+              ${
+                c.role === "user"
+                  ? `
+                    ml-12
+                    bg-gradient-to-br
+                    from-cyan-500/20
+                    to-blue-500/20
+                  `
+                  : `
+                    mr-12
+                    bg-white/[0.06]
+                  `
+              }
+            `}
+          >
+            <div
+              className="
+                prose prose-invert max-w-none
 
-        .delay-150 {
-          animation-delay: 0.3s;
-        }
-      `}</style>
+                prose-headings:font-bold
+                prose-headings:text-white
 
-    </main>
+                prose-h1:text-4xl
+                prose-h2:text-3xl
+                prose-h3:text-2xl
+
+                prose-p:text-white/90
+                prose-p:leading-8
+                prose-p:text-[16px]
+
+                prose-strong:text-cyan-300
+
+                prose-li:text-white/85
+                prose-li:marker:text-cyan-400
+
+                prose-code:text-cyan-300
+
+                prose-hr:border-white/10
+              "
+              dangerouslySetInnerHTML={{
+                __html: renderContent(c.content),
+              }}
+            />
+          </div>
+        ))}
+
+        {loading && (
+          <div className="text-cyan-300 animate-pulse">
+            Thinking...
+          </div>
+        )}
+      </div>
+
+      {/* INPUT */}
+      <div className="flex gap-3 mt-4">
+        <input
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              sendMessage();
+            }
+          }}
+          placeholder="Ask anything..."
+          className="
+            flex-1
+            p-4
+            rounded-3xl
+
+            bg-white/10
+            border border-white/10
+
+            backdrop-blur-2xl
+
+            outline-none
+
+            text-white
+            placeholder:text-white/35
+
+            focus:border-cyan-400
+            focus:bg-white/15
+
+            transition-all duration-300
+          "
+        />
+
+        <button
+          onClick={sendMessage}
+          className="
+            px-7 py-4
+            rounded-3xl
+
+            bg-gradient-to-r
+            from-cyan-500
+            to-blue-500
+
+            hover:scale-[1.03]
+            active:scale-[0.98]
+
+            transition-all duration-300
+
+            font-semibold
+            shadow-xl
+          "
+        >
+          Send
+        </button>
+      </div>
+    </div>
   );
 }
